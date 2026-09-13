@@ -34,6 +34,12 @@ def inject_css() -> None:
             padding-bottom: 3rem;
             max-width: 1180px;
         }
+        section[data-testid="stSidebar"] {
+            display: none;
+        }
+        div[data-testid="stAppViewContainer"] > .main {
+            margin-left: 0;
+        }
         h1, h2, h3 { color: var(--ink); letter-spacing: 0; }
         .hero {
             border: 1px solid var(--line);
@@ -65,7 +71,7 @@ def inject_css() -> None:
             border-radius: 6px;
             margin: 12px 0 18px 0;
         }
-        .metric-card, .status-card, .nav-card {
+        .metric-card, .status-card, .nav-card, .settings-panel {
             border: 1px solid var(--line);
             border-radius: 8px;
             padding: 15px;
@@ -106,8 +112,11 @@ def inject_css() -> None:
         }
         div.stButton > button {
             border-radius: 8px;
-            min-height: 46px;
+            min-height: 62px;
             font-weight: 700;
+            justify-content: flex-start;
+            text-align: left;
+            padding: 12px 16px;
         }
         </style>
         """,
@@ -303,42 +312,23 @@ def set_page(page: str) -> None:
 
 
 def render_home() -> None:
-    hero(
-        "달러 환율 나침반",
-        "최신 원/달러 환율과 달러지수로 매수 환경을 점검하고, 과거 일별 데이터로 원화와 달러를 오가는 스위칭 전략을 테스트합니다.",
+    st.title("🧭 달러 환율 나침반")
+    st.caption("Dollar Compass · 최신 환율 조건을 이해하고, 원화/달러 스위칭을 데이터로 확인하세요.")
+    st.write("어떤 분석을 해볼까요?")
+    st.button(
+        "📖  포트폴리오 계산기 개요\n\n최신 원/달러 환율, 달러지수, 달러 갭 비율, 적정 환율 4가지 조건을 확인합니다.",
+        use_container_width=True,
+        on_click=set_page,
+        args=("overview",),
     )
-    st.markdown(
-        """
-        <div class="note">
-            첫 화면은 두 가지 작업으로 나뉩니다. 먼저 오늘 기준의 달러 투자 환경을 보고,
-            다음 화면에서 거치식 또는 월 적립식 백테스트를 실행합니다.
-        </div>
-        """,
-        unsafe_allow_html=True,
+    st.button(
+        "📈  거치식 · 적립식 계산\n\n입력한 기간과 금액으로 원화/달러 스위칭 전략을 백테스트합니다.",
+        use_container_width=True,
+        on_click=set_page,
+        args=("calculator",),
     )
-    left, right = st.columns(2)
-    with left:
-        st.markdown(
-            """
-            <div class="nav-card">
-                <div class="small-title">포트폴리오 계산기 개요</div>
-                <div class="status-help">52주 평균 환율, 52주 평균 달러지수, 달러 갭 비율, 적정 환율 기준으로 현재 달러 매수 환경을 요약합니다.</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-        st.button("개요 보기", use_container_width=True, on_click=set_page, args=("overview",))
-    with right:
-        st.markdown(
-            """
-            <div class="nav-card">
-                <div class="small-title">거치식 / 적립식 계산</div>
-                <div class="status-help">입력한 기간과 금액으로 일별 조건을 판정하고, 원화와 달러의 스위칭 지점을 그래프와 표로 확인합니다.</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-        st.button("계산하기", use_container_width=True, on_click=set_page, args=("calculator",))
+    latest_note = date.today().strftime("%Y.%m.%d")
+    st.caption(f"달러 환율 나침반 · {latest_note} 기준 연구 앱 | 과거 성과를 분석하는 도구이며 미래 수익을 보장하지 않습니다.")
 
 
 def render_overview(data: pd.DataFrame) -> None:
@@ -387,7 +377,7 @@ def render_overview(data: pd.DataFrame) -> None:
         .mark_line()
         .encode(
             x=alt.X("date:T", title="날짜"),
-            y=alt.Y("환율:Q", title="환율"),
+            y=alt.Y("환율:Q", title="환율", scale=alt.Scale(zero=False)),
             color=alt.Color("구분:N", title=""),
             tooltip=["date:T", "구분:N", alt.Tooltip("환율:Q", format=",.2f")],
         )
@@ -405,18 +395,38 @@ def render_calculator(data: pd.DataFrame) -> None:
     min_date = pd.Timestamp(data["date"].min()).date()
     max_date = pd.Timestamp(data["date"].max()).date()
 
-    with st.sidebar:
-        st.header("백테스트 설정")
+    st.subheader("백테스트 설정")
+    st.markdown(
+        """
+        <div class="note">
+            거치 금액을 먼저 투입하고, 월 적립식 옵션을 켜면 매월 첫 거래일에 적립 금액이 추가됩니다.
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    row1 = st.columns(4)
+    with row1[0]:
         start_date = st.date_input("시작일", value=max(min_date, max_date - timedelta(days=365 * 3)), min_value=min_date, max_value=max_date)
+    with row1[1]:
         end_date = st.date_input("종료일", value=max_date, min_value=min_date, max_value=max_date)
+    with row1[2]:
         initial_krw = st.number_input("거치 금액", min_value=100_000, value=10_000_000, step=100_000)
+    with row1[3]:
+        fee_pct = st.slider("환전 수수료", min_value=0.0, max_value=1.0, value=0.15, step=0.01) / 100
+
+    row2 = st.columns(4)
+    with row2[0]:
         recurring_enabled = st.toggle("월 적립식 옵션", value=False)
-        monthly_krw = 0
+    monthly_krw = 0
+    with row2[1]:
         if recurring_enabled:
             monthly_krw = st.number_input("월 적립 금액", min_value=10_000, value=500_000, step=10_000)
+        else:
+            st.number_input("월 적립 금액", min_value=0, value=0, step=10_000, disabled=True)
+    with row2[2]:
         buy_score = st.slider("달러 전환 조건 수", min_value=1, max_value=4, value=3)
+    with row2[3]:
         sell_score = st.slider("원화 전환 조건 수", min_value=0, max_value=3, value=1)
-        fee_pct = st.slider("환전 수수료", min_value=0.0, max_value=1.0, value=0.15, step=0.01) / 100
 
     if start_date >= end_date:
         st.warning("시작일은 종료일보다 빨라야 합니다.")
@@ -447,7 +457,7 @@ def render_calculator(data: pd.DataFrame) -> None:
         .mark_line(color="#0f766e", strokeWidth=3)
         .encode(
             x=alt.X("date:T", title="날짜"),
-            y=alt.Y("total_value:Q", title="평가금액", axis=alt.Axis(format=",")),
+            y=alt.Y("total_value:Q", title="평가금액", axis=alt.Axis(format=","), scale=alt.Scale(zero=False)),
             tooltip=[alt.Tooltip("date:T", title="날짜"), alt.Tooltip("total_value:Q", title="평가금액", format=",.0f"), alt.Tooltip("position:N", title="포지션"), alt.Tooltip("signal_score:Q", title="조건 점수")],
         )
     )
@@ -458,7 +468,7 @@ def render_calculator(data: pd.DataFrame) -> None:
             .mark_point(size=95, filled=True)
             .encode(
                 x="date:T",
-                y=alt.Y("value:Q"),
+                y=alt.Y("value:Q", scale=alt.Scale(zero=False)),
                 color=alt.Color("action:N", title="스위칭"),
                 shape=alt.Shape("action:N", title="스위칭"),
                 tooltip=[alt.Tooltip("date:T", title="날짜"), alt.Tooltip("action:N", title="전환"), alt.Tooltip("rate:Q", title="환율", format=",.2f"), alt.Tooltip("score:Q", title="조건 점수")],
@@ -473,7 +483,7 @@ def render_calculator(data: pd.DataFrame) -> None:
     rate_chart = (
         alt.Chart(rate_chart_data)
         .mark_line()
-        .encode(x=alt.X("date:T", title="날짜"), y=alt.Y("환율:Q", title="환율"), color=alt.Color("구분:N", title=""), tooltip=["date:T", "구분:N", alt.Tooltip("환율:Q", format=",.2f")])
+        .encode(x=alt.X("date:T", title="날짜"), y=alt.Y("환율:Q", title="환율", scale=alt.Scale(zero=False)), color=alt.Color("구분:N", title=""), tooltip=["date:T", "구분:N", alt.Tooltip("환율:Q", format=",.2f")])
         .properties(height=330)
     )
     st.altair_chart(rate_chart, use_container_width=True)
