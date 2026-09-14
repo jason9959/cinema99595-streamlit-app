@@ -279,13 +279,16 @@ def backtest_switching(
             signal_direction = None
 
         can_switch_this_day = False
+        next_switch_date = None
         if signal_direction is None:
             last_switch_direction = None
             last_switch_date = None
         elif signal_direction != last_switch_direction:
             can_switch_this_day = True
-        elif last_switch_date is not None and current_date >= last_switch_date + pd.DateOffset(months=1):
-            can_switch_this_day = True
+        elif last_switch_date is not None:
+            next_switch_date = last_switch_date + pd.DateOffset(months=1)
+            if current_date >= next_switch_date:
+                can_switch_this_day = True
 
         contribution_action = "없음"
         if recurring_enabled and current_month != last_contribution_month and float(monthly_krw) > 0:
@@ -313,13 +316,20 @@ def backtest_switching(
             last_contribution_month = current_month
 
         action = "보유"
+        action_reason = "환전 없음"
         converted_value = 0.0
         cash_before_switch = cash
         usd_before_switch = usd
         usd_value_before_switch = usd * rate
         total_before_switch = cash + usd_value_before_switch
 
-        if can_switch_this_day and total_before_switch > 0:
+        if signal_direction is None:
+            action_reason = "Stay"
+        elif not can_switch_this_day:
+            action_reason = f"한달 대기: {next_switch_date.date()}부터 가능" if next_switch_date is not None else "한달 대기"
+        elif total_before_switch <= 0:
+            action_reason = "평가액 없음"
+        elif can_switch_this_day and total_before_switch > 0:
             target_value = total_before_switch * switch_pct
             if signal_direction == "원화→달러" and cash > 0:
                 krw_to_convert = min(cash, target_value)
@@ -327,6 +337,7 @@ def backtest_switching(
                 cash -= krw_to_convert
                 converted_value = krw_to_convert
                 action = "원화→달러"
+                action_reason = "환전 실행"
             elif signal_direction == "달러→원화" and usd > 0:
                 usd_value_available = usd * rate
                 usd_value_to_convert = min(usd_value_available, target_value)
@@ -335,6 +346,11 @@ def backtest_switching(
                 cash += usd_value_to_convert * (1 - fee_pct)
                 converted_value = usd_value_to_convert
                 action = "달러→원화"
+                action_reason = "환전 실행"
+            elif signal_direction == "원화→달러":
+                action_reason = "원화 부족"
+            elif signal_direction == "달러→원화":
+                action_reason = "달러 부족"
 
             if converted_value > 0:
                 last_switch_direction = signal_direction
@@ -367,6 +383,8 @@ def backtest_switching(
                 "signal_score": score,
                 "position": f"원화 {cash_weight:.0%} / 달러 {usd_weight:.0%}",
                 "action": action,
+                "action_reason": action_reason,
+                "next_switch_date": next_switch_date,
                 "signal_direction": signal_direction or "Stay",
                 "contribution_action": contribution_action,
                 "cash_krw": cash,
@@ -492,35 +510,43 @@ def render_calculator(data: pd.DataFrame) -> None:
         """,
         unsafe_allow_html=True,
     )
-    row1 = st.columns(4)
-    with row1[0]:
-        start_date = st.date_input("시작일", value=max(min_date, max_date - timedelta(days=365 * 3)), min_value=min_date, max_value=max_date)
-    with row1[1]:
-        end_date = st.date_input("종료일", value=max_date, min_value=min_date, max_value=max_date)
-    with row1[2]:
-        initial_krw = st.number_input("거치 금액", min_value=100_000, value=10_000_000, step=100_000)
-    with row1[3]:
-        fee_pct = st.slider("환전 수수료", min_value=0.0, max_value=1.0, value=0.15, step=0.01) / 100
+    with st.form("backtest_settings"):
+        row1 = st.columns(4)
+        with row1[0]:
+            start_date = st.date_input("시작일", value=max(min_date, max_date - timedelta(days=365 * 3)), min_value=min_date, max_value=max_date)
+        with row1[1]:
+            end_date = st.date_input("종료일", value=max_date, min_value=min_date, max_value=max_date)
+        with row1[2]:
+            initial_krw = st.number_input("거치 금액", min_value=100_000, value=10_000_000, step=100_000)
+        with row1[3]:
+            fee_pct = st.slider("환전 수수료", min_value=0.0, max_value=1.0, value=0.15, step=0.01) / 100
 
-    row2 = st.columns(4)
-    with row2[0]:
-        recurring_enabled = st.toggle("월 적립식 옵션", value=False)
-    monthly_krw = 0
-    with row2[1]:
-        if recurring_enabled:
-            monthly_krw = st.number_input("월 적립 금액", min_value=10_000, value=500_000, step=10_000)
-        else:
-            st.number_input("월 적립 금액", min_value=0, value=0, step=10_000, disabled=True)
-    with row2[2]:
-        switch_pct = st.slider("신호 발생 시 환전 비율", min_value=1.0, max_value=50.0, value=10.0, step=1.0) / 100
-    with row2[3]:
-        st.metric("전략 규칙", "0~1 매도 · 2 Stay · 3~4 매수")
+        row2 = st.columns(4)
+        with row2[0]:
+            recurring_enabled = st.checkbox("월 적립식 옵션", value=False)
+        monthly_krw = 0
+        with row2[1]:
+            if recurring_enabled:
+                monthly_krw = st.number_input("월 적립 금액", min_value=10_000, value=500_000, step=10_000)
+            else:
+                st.number_input("월 적립 금액", min_value=0, value=0, step=10_000, disabled=True)
+        with row2[2]:
+            switch_pct = st.slider("신호 발생 시 환전 비율", min_value=1.0, max_value=50.0, value=10.0, step=1.0) / 100
+        with row2[3]:
+            st.metric("전략 규칙", "0~1 매도 · 2 Stay · 3~4 매수")
+
+        submitted = st.form_submit_button("백테스트 실행", use_container_width=True)
+
+    if not submitted:
+        st.info("조건을 입력한 뒤 `백테스트 실행` 버튼을 누르면 결과와 그래프가 표시됩니다.")
+        return
 
     if start_date >= end_date:
         st.warning("시작일은 종료일보다 빨라야 합니다.")
         return
 
-    curve, switches = backtest_switching(data, start_date, end_date, float(initial_krw), bool(recurring_enabled), float(monthly_krw), float(switch_pct), float(fee_pct))
+    with st.spinner("백테스트를 계산하는 중입니다..."):
+        curve, switches = backtest_switching(data, start_date, end_date, float(initial_krw), bool(recurring_enabled), float(monthly_krw), float(switch_pct), float(fee_pct))
     if curve.empty:
         st.warning("선택한 기간에 계산 가능한 데이터가 없습니다.")
         return
@@ -592,6 +618,8 @@ def render_calculator(data: pd.DataFrame) -> None:
             "signal_score",
             "signal_direction",
             "action",
+            "action_reason",
+            "next_switch_date",
             "contribution_action",
             "cash_krw",
             "usd_amount",
@@ -614,6 +642,8 @@ def render_calculator(data: pd.DataFrame) -> None:
         "조건점수",
         "신호",
         "액션",
+        "미실행사유",
+        "다음환전가능일",
         "적립처리",
         "원화잔고",
         "달러수량",
@@ -626,6 +656,8 @@ def render_calculator(data: pd.DataFrame) -> None:
         "갭비율>52주평균",
         "환율<적정환율",
     ]
+    table["날짜"] = pd.to_datetime(table["날짜"]).dt.strftime("%Y-%m-%d")
+    table["다음환전가능일"] = pd.to_datetime(table["다음환전가능일"]).dt.strftime("%Y-%m-%d").fillna("")
     for col in ["원/달러", "달러지수", "달러갭비율", "적정환율", "달러수량", "총액USD"]:
         table[col] = table[col].map(lambda x: f"{x:,.4f}")
     for col in ["원화잔고", "달러평가액", "총액KRW"]:
