@@ -261,7 +261,7 @@ def backtest_switching(
     total_contribution = float(initial_krw)
     last_contribution_month = None
     last_switch_direction = None
-    last_switch_month = None
+    last_switch_date = None
     curve = []
     switches = []
 
@@ -281,7 +281,10 @@ def backtest_switching(
         can_switch_this_day = False
         if signal_direction is None:
             last_switch_direction = None
-        elif signal_direction != last_switch_direction or current_month != last_switch_month:
+            last_switch_date = None
+        elif signal_direction != last_switch_direction:
+            can_switch_this_day = True
+        elif last_switch_date is not None and current_date >= last_switch_date + pd.DateOffset(months=1):
             can_switch_this_day = True
 
         contribution_action = "없음"
@@ -335,7 +338,7 @@ def backtest_switching(
 
             if converted_value > 0:
                 last_switch_direction = signal_direction
-                last_switch_month = current_month
+                last_switch_date = current_date
                 switches.append(
                     {
                         "date": current_date,
@@ -484,7 +487,7 @@ def render_calculator(data: pd.DataFrame) -> None:
         <div class="note">
             시작일에는 거치 금액의 절반을 원화로, 절반을 달러로 보유합니다.
             조건 점수 0~1개는 달러→원화, 2개는 Stay, 3~4개는 원화→달러 신호로 보고,
-            같은 신호가 유지되면 월 1회 총 평가액의 설정 비율만 추가 환전합니다.
+            같은 신호가 유지되면 직전 환전일로부터 한 달 뒤에 총 평가액의 설정 비율만 추가 환전합니다.
         </div>
         """,
         unsafe_allow_html=True,
