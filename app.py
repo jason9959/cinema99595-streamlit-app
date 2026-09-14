@@ -246,17 +246,22 @@ def backtest_switching(
     initial_krw: float,
     recurring_enabled: bool,
     monthly_krw: float,
-    buy_score: int,
-    sell_score: int,
+    switch_pct: float,
     fee_pct: float,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     view = data[(data["date"].dt.date >= start_date) & (data["date"].dt.date <= end_date)].copy()
     view = view.sort_values("date").reset_index(drop=True)
-    cash = float(initial_krw)
-    usd = 0.0
-    state = "KRW"
+
+    if view.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    first_rate = float(view.iloc[0]["usdkrw"])
+    cash = float(initial_krw) / 2
+    usd = (float(initial_krw) / 2) * (1 - fee_pct) / first_rate
     total_contribution = float(initial_krw)
     last_contribution_month = None
+    last_switch_direction = None
+    last_switch_month = None
     curve = []
     switches = []
 
@@ -264,46 +269,91 @@ def backtest_switching(
         current_date = pd.Timestamp(row.date)
         current_month = (current_date.year, current_date.month)
         rate = float(row.usdkrw)
+        score = int(row.signal_score)
 
-        if recurring_enabled and current_month != last_contribution_month:
-            cash += float(monthly_krw)
+        if score <= 1:
+            signal_direction = "달러→원화"
+        elif score >= 3:
+            signal_direction = "원화→달러"
+        else:
+            signal_direction = None
+
+        can_switch_this_day = False
+        if signal_direction is None:
+            last_switch_direction = None
+        elif signal_direction != last_switch_direction or current_month != last_switch_month:
+            can_switch_this_day = True
+
+        contribution_action = "없음"
+        if recurring_enabled and current_month != last_contribution_month and float(monthly_krw) > 0:
+            contribution = float(monthly_krw)
+            usd_value_before = usd * rate
+            total_before = cash + usd_value_before
+
+            if can_switch_this_day and signal_direction == "달러→원화":
+                cash += contribution
+                contribution_action = "원화 적립"
+            elif can_switch_this_day and signal_direction == "원화→달러":
+                usd += contribution * (1 - fee_pct) / rate
+                contribution_action = "달러 적립"
+            elif total_before > 0:
+                cash_weight = cash / total_before
+                usd_weight = usd_value_before / total_before
+                cash += contribution * cash_weight
+                usd += contribution * usd_weight * (1 - fee_pct) / rate
+                contribution_action = "비율 적립"
+            else:
+                cash += contribution
+                contribution_action = "원화 적립"
+
             total_contribution += float(monthly_krw)
             last_contribution_month = current_month
 
-        score = int(row.signal_score)
         action = "보유"
+        converted_value = 0.0
+        cash_before_switch = cash
+        usd_before_switch = usd
+        usd_value_before_switch = usd * rate
+        total_before_switch = cash + usd_value_before_switch
 
-        if state == "KRW" and score >= buy_score and cash > 0:
-            usd = cash * (1 - fee_pct) / rate
-            cash = 0.0
-            state = "USD"
-            action = "달러 매수"
-            switches.append(
-                {
-                    "date": current_date,
-                    "action": action,
-                    "rate": rate,
-                    "score": score,
-                    "total_value": usd * rate * (1 - fee_pct),
-                }
-            )
-        elif state == "USD" and score <= sell_score and usd > 0:
-            cash = usd * rate * (1 - fee_pct)
-            usd = 0.0
-            state = "KRW"
-            action = "원화 전환"
-            switches.append(
-                {
-                    "date": current_date,
-                    "action": action,
-                    "rate": rate,
-                    "score": score,
-                    "total_value": cash,
-                }
-            )
+        if can_switch_this_day and total_before_switch > 0:
+            target_value = total_before_switch * switch_pct
+            if signal_direction == "원화→달러" and cash > 0:
+                krw_to_convert = min(cash, target_value)
+                usd += krw_to_convert * (1 - fee_pct) / rate
+                cash -= krw_to_convert
+                converted_value = krw_to_convert
+                action = "원화→달러"
+            elif signal_direction == "달러→원화" and usd > 0:
+                usd_value_available = usd * rate
+                usd_value_to_convert = min(usd_value_available, target_value)
+                usd_to_sell = usd_value_to_convert / rate
+                usd -= usd_to_sell
+                cash += usd_value_to_convert * (1 - fee_pct)
+                converted_value = usd_value_to_convert
+                action = "달러→원화"
 
-        usd_value = usd * rate * (1 - fee_pct)
+            if converted_value > 0:
+                last_switch_direction = signal_direction
+                last_switch_month = current_month
+                switches.append(
+                    {
+                        "date": current_date,
+                        "action": action,
+                        "rate": rate,
+                        "score": score,
+                        "total_value": cash + usd * rate,
+                        "converted_value": converted_value,
+                        "cash_before": cash_before_switch,
+                        "usd_value_before": usd_before_switch * rate,
+                    }
+                )
+
+        usd_value = usd * rate
         total_value = cash + usd_value
+        usd_weight = usd_value / total_value if total_value else 0.0
+        cash_weight = cash / total_value if total_value else 0.0
+        total_value_usd = total_value / rate if rate else 0.0
         curve.append(
             {
                 "date": current_date,
@@ -312,11 +362,17 @@ def backtest_switching(
                 "gap_ratio": float(row.gap_ratio),
                 "fair_rate": float(row.fair_rate),
                 "signal_score": score,
-                "position": state,
+                "position": f"원화 {cash_weight:.0%} / 달러 {usd_weight:.0%}",
                 "action": action,
+                "signal_direction": signal_direction or "Stay",
+                "contribution_action": contribution_action,
                 "cash_krw": cash,
                 "usd_amount": usd,
+                "usd_value": usd_value,
+                "cash_weight": cash_weight,
+                "usd_weight": usd_weight,
                 "total_value": total_value,
+                "total_value_usd": total_value_usd,
                 "total_contribution": total_contribution,
                 "return": total_value / total_contribution - 1,
                 "cond_fx_below_avg": bool(row.cond_fx_below_avg),
@@ -426,7 +482,9 @@ def render_calculator(data: pd.DataFrame) -> None:
     st.markdown(
         """
         <div class="note">
-            거치 금액을 먼저 투입하고, 월 적립식 옵션을 켜면 매월 첫 거래일에 적립 금액이 추가됩니다.
+            시작일에는 거치 금액의 절반을 원화로, 절반을 달러로 보유합니다.
+            조건 점수 0~1개는 달러→원화, 2개는 Stay, 3~4개는 원화→달러 신호로 보고,
+            같은 신호가 유지되면 월 1회 총 평가액의 설정 비율만 추가 환전합니다.
         </div>
         """,
         unsafe_allow_html=True,
@@ -451,31 +509,36 @@ def render_calculator(data: pd.DataFrame) -> None:
         else:
             st.number_input("월 적립 금액", min_value=0, value=0, step=10_000, disabled=True)
     with row2[2]:
-        buy_score = st.slider("달러 전환 조건 수", min_value=1, max_value=4, value=3)
+        switch_pct = st.slider("신호 발생 시 환전 비율", min_value=1.0, max_value=50.0, value=10.0, step=1.0) / 100
     with row2[3]:
-        sell_score = st.slider("원화 전환 조건 수", min_value=0, max_value=3, value=1)
+        st.metric("전략 규칙", "0~1 매도 · 2 Stay · 3~4 매수")
 
     if start_date >= end_date:
         st.warning("시작일은 종료일보다 빨라야 합니다.")
         return
 
-    curve, switches = backtest_switching(data, start_date, end_date, float(initial_krw), bool(recurring_enabled), float(monthly_krw), int(buy_score), int(sell_score), float(fee_pct))
+    curve, switches = backtest_switching(data, start_date, end_date, float(initial_krw), bool(recurring_enabled), float(monthly_krw), float(switch_pct), float(fee_pct))
     if curve.empty:
         st.warning("선택한 기간에 계산 가능한 데이터가 없습니다.")
         return
 
     final = curve.iloc[-1]
     mdd = max_drawdown(curve["total_value"])
-    cols = st.columns(5)
+    last_rate = float(final["usdkrw"])
+    final_value_krw = float(final["total_value"])
+    final_value_usd = float(final["total_value_usd"])
+    cols = st.columns(6)
     with cols[0]:
-        metric_card("최종 평가금액", format_krw(float(final["total_value"])), f"총 납입 {format_krw(float(final['total_contribution']))}")
+        metric_card("총액 KRW", format_krw(final_value_krw), f"총 납입 {format_krw(float(final['total_contribution']))}")
     with cols[1]:
-        metric_card("누적 수익률", format_pct(float(final["return"])), "납입 원금 대비")
+        metric_card("총액 USD", f"${final_value_usd:,.2f}", f"마지막 환율 {last_rate:,.2f}원 적용")
     with cols[2]:
-        metric_card("최대 낙폭", format_pct(mdd), "평가금액 기준")
+        metric_card("누적 수익률", format_pct(float(final["return"])), "납입 원금 대비")
     with cols[3]:
-        metric_card("전환 횟수", f"{len(switches)}회", f"현재 포지션 {final['position']}")
+        metric_card("최대 낙폭", format_pct(mdd), "평가금액 기준")
     with cols[4]:
+        metric_card("전환 횟수", f"{len(switches)}회", f"현재 비중 {final['position']}")
+    with cols[5]:
         metric_card("최근 조건 점수", f"{int(final['signal_score'])}/4", f"최근 환율 {float(final['usdkrw']):,.2f}원")
 
     st.subheader("평가금액 변화와 스위칭 지점")
@@ -516,8 +579,54 @@ def render_calculator(data: pd.DataFrame) -> None:
     st.altair_chart(rate_chart, use_container_width=True)
 
     st.subheader("일별 4조건 판정")
-    table = curve[["date", "usdkrw", "dxy", "gap_ratio", "fair_rate", "signal_score", "position", "action", "cond_fx_below_avg", "cond_dxy_below_avg", "cond_gap_above_avg", "cond_fx_below_fair"]].copy()
-    table.columns = ["날짜", "원/달러", "달러지수", "달러갭비율", "적정환율", "조건점수", "포지션", "액션", "환율<52주평균", "달러지수<52주평균", "갭비율>52주평균", "환율<적정환율"]
+    table = curve[
+        [
+            "date",
+            "usdkrw",
+            "dxy",
+            "gap_ratio",
+            "fair_rate",
+            "signal_score",
+            "signal_direction",
+            "action",
+            "contribution_action",
+            "cash_krw",
+            "usd_amount",
+            "usd_value",
+            "total_value",
+            "total_value_usd",
+            "position",
+            "cond_fx_below_avg",
+            "cond_dxy_below_avg",
+            "cond_gap_above_avg",
+            "cond_fx_below_fair",
+        ]
+    ].copy()
+    table.columns = [
+        "날짜",
+        "원/달러",
+        "달러지수",
+        "달러갭비율",
+        "적정환율",
+        "조건점수",
+        "신호",
+        "액션",
+        "적립처리",
+        "원화잔고",
+        "달러수량",
+        "달러평가액",
+        "총액KRW",
+        "총액USD",
+        "보유비중",
+        "환율<52주평균",
+        "달러지수<52주평균",
+        "갭비율>52주평균",
+        "환율<적정환율",
+    ]
+    for col in ["원/달러", "달러지수", "달러갭비율", "적정환율", "달러수량", "총액USD"]:
+        table[col] = table[col].map(lambda x: f"{x:,.4f}")
+    for col in ["원화잔고", "달러평가액", "총액KRW"]:
+        table[col] = table[col].map(lambda x: f"{x:,.0f}")
     for col in ["환율<52주평균", "달러지수<52주평균", "갭비율>52주평균", "환율<적정환율"]:
         table[col] = table[col].map(lambda x: "O" if x else "X")
     st.dataframe(table.sort_values("날짜", ascending=False), use_container_width=True, hide_index=True)
