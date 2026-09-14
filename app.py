@@ -12,6 +12,17 @@ st.set_page_config(page_title="달러 스위칭 백테스터", page_icon="USD", 
 
 USD_KRW_TICKER = "KRW=X"
 DOLLAR_INDEX_TICKER = "DX-Y.NYB"
+COMPARISON_SERIES = {
+    "달러인덱스": DOLLAR_INDEX_TICKER,
+    "원/달러 환율": USD_KRW_TICKER,
+    "엔/달러 환율": "JPY=X",
+    "위안/달러 환율": "CNY=X",
+    "스위스프랑/달러 환율": "CHF=X",
+    "캐나다달러/달러 환율": "CAD=X",
+    "유로/달러 환율": "EURUSD=X",
+    "파운드/달러 환율": "GBPUSD=X",
+    "호주달러/달러 환율": "AUDUSD=X",
+}
 
 
 def inject_css() -> None:
@@ -193,6 +204,19 @@ def make_sample_market_data() -> pd.DataFrame:
     return pd.DataFrame({"date": dates, "usdkrw": usdkrw.round(2), "dxy": dxy.round(2), "source": "sample"})
 
 
+def make_sample_comparison_data() -> pd.DataFrame:
+    dates = pd.date_range(date.today() - timedelta(days=365 * 7), date.today(), freq="B")
+    rng = np.random.default_rng(995950)
+    data = pd.DataFrame({"date": dates})
+    for i, label in enumerate(COMPARISON_SERIES):
+        base = 95 + i * 9
+        cycle = np.sin(np.linspace(i / 3, 8 * np.pi + i / 3, len(dates))) * (3.5 + i * 0.2)
+        drift = np.cumsum(rng.normal(0, 0.045 + i * 0.002, len(dates)))
+        data[label] = (base + cycle + drift).round(4)
+    data["source"] = "sample"
+    return data
+
+
 @st.cache_data(ttl=60 * 60 * 4)
 def load_market_data() -> pd.DataFrame:
     try:
@@ -220,6 +244,42 @@ def load_market_data() -> pd.DataFrame:
         return data.sort_values("date").reset_index(drop=True)
     except Exception:
         return make_sample_market_data()
+
+
+@st.cache_data(ttl=60 * 60 * 4)
+def load_comparison_data() -> pd.DataFrame:
+    try:
+        import yfinance as yf
+
+        start = date.today() - timedelta(days=365 * 7)
+        end = date.today() + timedelta(days=1)
+        raw = yf.download(
+            list(COMPARISON_SERIES.values()),
+            start=start,
+            end=end,
+            progress=False,
+            auto_adjust=False,
+            group_by="ticker",
+            threads=False,
+        )
+        series = []
+        for label, ticker in COMPARISON_SERIES.items():
+            try:
+                close = raw[ticker]["Close"].rename(label)
+                series.append(close)
+            except Exception:
+                continue
+        if len(series) < 2:
+            raise ValueError("not enough comparison data")
+        data = pd.concat(series, axis=1).dropna(how="all").ffill().dropna().reset_index()
+        data = data.rename(columns={data.columns[0]: "date"})
+        data["date"] = pd.to_datetime(data["date"]).dt.tz_localize(None)
+        data["source"] = "yfinance"
+        if len(data) < 260:
+            raise ValueError("not enough comparison data")
+        return data.sort_values("date").reset_index(drop=True)
+    except Exception:
+        return make_sample_comparison_data()
 
 
 def add_indicators(data: pd.DataFrame) -> pd.DataFrame:
@@ -430,6 +490,12 @@ def render_home() -> None:
         use_container_width=True,
         on_click=set_page,
         args=("calculator",),
+    )
+    st.button(
+        "📊  지표 비교 차트\n\n기간과 지표 두 가지를 선택해 시작일 100 기준으로 움직임을 비교합니다.",
+        use_container_width=True,
+        on_click=set_page,
+        args=("comparison",),
     )
     latest_note = date.today().strftime("%Y.%m.%d")
     st.caption(f"달러 환율 나침반 · {latest_note} 기준 연구 앱 | 과거 성과를 분석하는 도구이며 미래 수익을 보장하지 않습니다.")
@@ -703,6 +769,102 @@ def render_calculator(data: pd.DataFrame) -> None:
     st.dataframe(table.sort_values("날짜", ascending=False), use_container_width=True, hide_index=True)
 
 
+def render_comparison() -> None:
+    hero(
+        "지표 비교 차트",
+        "기간과 지표 두 가지를 선택하면 시작일 값을 100으로 맞춰 같은 기준에서 상승률과 하락률을 비교합니다.",
+    )
+    st.button("첫 화면으로", on_click=set_page, args=("home",))
+
+    data = load_comparison_data()
+    min_date = pd.Timestamp(data["date"].min()).date()
+    max_date = pd.Timestamp(data["date"].max()).date()
+    source = "Yahoo Finance" if data["source"].iloc[-1] == "yfinance" else "샘플 데이터"
+    labels = [label for label in COMPARISON_SERIES if label in data.columns]
+
+    st.markdown(
+        f"""
+        <div class="note">
+            기준화 방식: 선택한 시작일의 각 지표 값을 100으로 두고 이후 변화를 계산합니다.<br>
+            데이터 출처: {source}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    with st.form("comparison_settings"):
+        row1 = st.columns(4)
+        with row1[0]:
+            start_date = st.date_input("시작일", value=max(min_date, max_date - timedelta(days=365)), min_value=min_date, max_value=max_date, key="compare_start")
+        with row1[1]:
+            end_date = st.date_input("종료일", value=max_date, min_value=min_date, max_value=max_date, key="compare_end")
+        with row1[2]:
+            first_metric = st.selectbox("첫 번째 지표", labels, index=0)
+        with row1[3]:
+            default_second = labels.index("원/달러 환율") if "원/달러 환율" in labels else min(1, len(labels) - 1)
+            second_metric = st.selectbox("두 번째 지표", labels, index=default_second)
+        submitted = st.form_submit_button("비교 차트 실행", use_container_width=True)
+
+    if not submitted:
+        st.info("기간과 지표 두 가지를 선택한 뒤 `비교 차트 실행` 버튼을 누르면 그래프가 표시됩니다.")
+        return
+    if start_date >= end_date:
+        st.warning("시작일은 종료일보다 빨라야 합니다.")
+        return
+    if first_metric == second_metric:
+        st.warning("서로 다른 두 지표를 선택해 주세요.")
+        return
+
+    selected = [first_metric, second_metric]
+    view = data[(data["date"].dt.date >= start_date) & (data["date"].dt.date <= end_date)][["date", *selected]].copy()
+    view = view.dropna().sort_values("date").reset_index(drop=True)
+    if view.empty or len(view) < 2:
+        st.warning("선택한 기간에 비교 가능한 데이터가 부족합니다.")
+        return
+
+    indexed = view.copy()
+    for metric in selected:
+        indexed[metric] = indexed[metric] / float(indexed.loc[0, metric]) * 100
+    long_data = indexed.melt(id_vars=["date"], value_vars=selected, var_name="지표", value_name="지수")
+
+    first_row = view.iloc[0]
+    last_row = view.iloc[-1]
+    cols = st.columns(2)
+    for idx, metric in enumerate(selected):
+        change = float(last_row[metric]) / float(first_row[metric]) - 1
+        with cols[idx]:
+            metric_card(
+                metric,
+                format_pct(change),
+                f"{pd.Timestamp(first_row['date']).date()} = 100 · 마지막 실제값 {float(last_row[metric]):,.4f}",
+            )
+
+    chart = (
+        alt.Chart(long_data)
+        .mark_line(strokeWidth=3)
+        .encode(
+            x=alt.X("date:T", title="날짜"),
+            y=alt.Y("지수:Q", title="시작일=100", scale=alt.Scale(zero=False)),
+            color=alt.Color("지표:N", title="", legend=alt.Legend(orient="bottom")),
+            tooltip=[
+                alt.Tooltip("date:T", title="날짜"),
+                alt.Tooltip("지표:N", title="지표"),
+                alt.Tooltip("지수:Q", title="시작일=100", format=",.2f"),
+            ],
+        )
+        .properties(height=430)
+    )
+    st.altair_chart(chart, use_container_width=True)
+
+    st.subheader("일별 비교 데이터")
+    table = view.copy()
+    table["날짜"] = pd.to_datetime(table["date"]).dt.strftime("%Y-%m-%d")
+    table = table[["날짜", *selected]]
+    for metric in selected:
+        table[metric] = table[metric].map(lambda x: f"{x:,.4f}")
+    st.dataframe(table.sort_values("날짜", ascending=False), use_container_width=True, hide_index=True)
+
+
 def main() -> None:
     inject_css()
     if "page" not in st.session_state:
@@ -712,6 +874,8 @@ def main() -> None:
         render_overview(market_data)
     elif st.session_state["page"] == "calculator":
         render_calculator(market_data)
+    elif st.session_state["page"] == "comparison":
+        render_comparison()
     else:
         render_home()
 
