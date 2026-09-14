@@ -584,17 +584,53 @@ def render_calculator(data: pd.DataFrame) -> None:
     if not switches.empty:
         points = (
             alt.Chart(switches)
-            .mark_point(size=95, filled=True)
+            .mark_point(size=130, filled=True, stroke="white", strokeWidth=1.5)
             .encode(
                 x="date:T",
                 y=alt.Y("total_value:Q", axis=krw_axis("평가금액"), scale=alt.Scale(zero=False)),
                 color=alt.Color("action:N", title="스위칭", legend=alt.Legend(orient="bottom")),
                 shape=alt.Shape("action:N", title="스위칭", legend=alt.Legend(orient="bottom")),
-                tooltip=[alt.Tooltip("date:T", title="날짜"), alt.Tooltip("action:N", title="전환"), alt.Tooltip("rate:Q", title="환율", format=",.2f"), alt.Tooltip("score:Q", title="조건 점수")],
+                tooltip=[
+                    alt.Tooltip("date:T", title="날짜"),
+                    alt.Tooltip("action:N", title="전환"),
+                    alt.Tooltip("converted_value:Q", title="환전금액", format=",.0f"),
+                    alt.Tooltip("rate:Q", title="환율", format=",.2f"),
+                    alt.Tooltip("score:Q", title="조건 점수"),
+                ],
             )
         )
         chart = base_chart + points
     st.altair_chart(chart.properties(height=420), use_container_width=True)
+
+    if not switches.empty:
+        st.subheader("스위칭 내역")
+        switch_table = switches[
+            [
+                "date",
+                "action",
+                "converted_value",
+                "rate",
+                "score",
+                "cash_before",
+                "usd_value_before",
+                "total_value",
+            ]
+        ].copy()
+        switch_table.columns = [
+            "날짜",
+            "전환",
+            "환전금액KRW",
+            "환율",
+            "조건점수",
+            "환전전 원화",
+            "환전전 달러평가액",
+            "환전후 총액",
+        ]
+        switch_table["날짜"] = pd.to_datetime(switch_table["날짜"]).dt.strftime("%Y-%m-%d")
+        for col in ["환전금액KRW", "환전전 원화", "환전전 달러평가액", "환전후 총액"]:
+            switch_table[col] = switch_table[col].map(lambda x: f"{x:,.0f}")
+        switch_table["환율"] = switch_table["환율"].map(lambda x: f"{x:,.2f}")
+        st.dataframe(switch_table.sort_values("날짜", ascending=False), use_container_width=True, hide_index=True)
 
     st.subheader("원/달러 환율과 적정 환율")
     rate_chart_data = curve.melt(id_vars=["date"], value_vars=["usdkrw", "fair_rate"], var_name="구분", value_name="환율")
