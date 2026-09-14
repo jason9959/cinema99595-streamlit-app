@@ -174,6 +174,16 @@ def format_pct(value: float) -> str:
     return f"{value * 100:,.2f}%"
 
 
+def krw_axis(title: str) -> alt.Axis:
+    return alt.Axis(
+        title=title,
+        labelExpr=(
+            "datum.value >= 100000000 ? format(datum.value / 100000000, '.2f') + '억원' : "
+            "format(datum.value / 10000000, '.2f') + '천만원'"
+        ),
+    )
+
+
 def make_sample_market_data() -> pd.DataFrame:
     dates = pd.date_range(date.today() - timedelta(days=365 * 6), date.today(), freq="B")
     rng = np.random.default_rng(99595)
@@ -218,6 +228,7 @@ def add_indicators(data: pd.DataFrame) -> pd.DataFrame:
     out["usdkrw_52w_avg"] = out["usdkrw"].rolling(252, min_periods=60).mean()
     out["dxy_52w_avg"] = out["dxy"].rolling(252, min_periods=60).mean()
     out["gap_52w_avg"] = out["gap_ratio"].rolling(252, min_periods=60).mean()
+    out["current_dollar_index"] = out["dxy"]
     out["fair_rate"] = out["dxy"] / out["gap_52w_avg"] * 100
     out["cond_fx_below_avg"] = out["usdkrw"] < out["usdkrw_52w_avg"]
     out["cond_dxy_below_avg"] = out["dxy"] < out["dxy_52w_avg"]
@@ -267,13 +278,29 @@ def backtest_switching(
             cash = 0.0
             state = "USD"
             action = "달러 매수"
-            switches.append({"date": current_date, "action": action, "rate": rate, "score": score, "value": usd * rate * (1 - fee_pct)})
+            switches.append(
+                {
+                    "date": current_date,
+                    "action": action,
+                    "rate": rate,
+                    "score": score,
+                    "total_value": usd * rate * (1 - fee_pct),
+                }
+            )
         elif state == "USD" and score <= sell_score and usd > 0:
             cash = usd * rate * (1 - fee_pct)
             usd = 0.0
             state = "KRW"
             action = "원화 전환"
-            switches.append({"date": current_date, "action": action, "rate": rate, "score": score, "value": cash})
+            switches.append(
+                {
+                    "date": current_date,
+                    "action": action,
+                    "rate": rate,
+                    "score": score,
+                    "total_value": cash,
+                }
+            )
 
         usd_value = usd * rate * (1 - fee_pct)
         total_value = cash + usd_value
@@ -345,7 +372,7 @@ def render_overview(data: pd.DataFrame) -> None:
         <div class="note">
             기준일: {latest_date} · 데이터 출처: {source}<br>
             달러 갭 비율은 <b>달러지수 / 원달러환율 * 100</b>으로 계산했고,
-            적정 환율은 <b>현재 달러지수 / 52주 평균 달러갭비율 * 100</b>으로 추정했습니다.
+            적정 환율은 <b>현재 달러지수 / 52주 평균 달러 갭 비율 * 100</b>으로 추정했습니다.
         </div>
         """,
         unsafe_allow_html=True,
@@ -378,7 +405,7 @@ def render_overview(data: pd.DataFrame) -> None:
         .encode(
             x=alt.X("date:T", title="날짜"),
             y=alt.Y("환율:Q", title="환율", scale=alt.Scale(zero=False)),
-            color=alt.Color("구분:N", title=""),
+            color=alt.Color("구분:N", title="", legend=alt.Legend(orient="bottom")),
             tooltip=["date:T", "구분:N", alt.Tooltip("환율:Q", format=",.2f")],
         )
         .properties(height=360)
@@ -457,7 +484,7 @@ def render_calculator(data: pd.DataFrame) -> None:
         .mark_line(color="#0f766e", strokeWidth=3)
         .encode(
             x=alt.X("date:T", title="날짜"),
-            y=alt.Y("total_value:Q", title="평가금액", axis=alt.Axis(format=","), scale=alt.Scale(zero=False)),
+            y=alt.Y("total_value:Q", title="평가금액", axis=krw_axis("평가금액"), scale=alt.Scale(zero=False)),
             tooltip=[alt.Tooltip("date:T", title="날짜"), alt.Tooltip("total_value:Q", title="평가금액", format=",.0f"), alt.Tooltip("position:N", title="포지션"), alt.Tooltip("signal_score:Q", title="조건 점수")],
         )
     )
@@ -468,9 +495,9 @@ def render_calculator(data: pd.DataFrame) -> None:
             .mark_point(size=95, filled=True)
             .encode(
                 x="date:T",
-                y=alt.Y("value:Q", scale=alt.Scale(zero=False)),
-                color=alt.Color("action:N", title="스위칭"),
-                shape=alt.Shape("action:N", title="스위칭"),
+                y=alt.Y("total_value:Q", axis=krw_axis("평가금액"), scale=alt.Scale(zero=False)),
+                color=alt.Color("action:N", title="스위칭", legend=alt.Legend(orient="bottom")),
+                shape=alt.Shape("action:N", title="스위칭", legend=alt.Legend(orient="bottom")),
                 tooltip=[alt.Tooltip("date:T", title="날짜"), alt.Tooltip("action:N", title="전환"), alt.Tooltip("rate:Q", title="환율", format=",.2f"), alt.Tooltip("score:Q", title="조건 점수")],
             )
         )
@@ -483,7 +510,7 @@ def render_calculator(data: pd.DataFrame) -> None:
     rate_chart = (
         alt.Chart(rate_chart_data)
         .mark_line()
-        .encode(x=alt.X("date:T", title="날짜"), y=alt.Y("환율:Q", title="환율", scale=alt.Scale(zero=False)), color=alt.Color("구분:N", title=""), tooltip=["date:T", "구분:N", alt.Tooltip("환율:Q", format=",.2f")])
+        .encode(x=alt.X("date:T", title="날짜"), y=alt.Y("환율:Q", title="환율", scale=alt.Scale(zero=False)), color=alt.Color("구분:N", title="", legend=alt.Legend(orient="bottom")), tooltip=["date:T", "구분:N", alt.Tooltip("환율:Q", format=",.2f")])
         .properties(height=330)
     )
     st.altair_chart(rate_chart, use_container_width=True)
